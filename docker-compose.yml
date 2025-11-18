@@ -1,0 +1,134 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: stockanalysis_db
+    environment:
+      POSTGRES_USER: stockuser
+      POSTGRES_PASSWORD: stockpass
+      POSTGRES_DB: stockanalysis
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stockuser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: stockanalysis_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stockanalysis_backend
+    environment:
+      DATABASE_URL: postgresql://stockuser:stockpass@postgres:5432/stockanalysis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-in-production}
+      DEBUG: ${DEBUG:-True}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - ./logs:/app/logs
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery Worker
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stockanalysis_celery
+    environment:
+      DATABASE_URL: postgresql://stockuser:stockpass@postgres:5432/stockanalysis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./backend:/app
+    command: celery -A app.celery_app worker --loglevel=info
+
+  # Celery Beat (Scheduler)
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stockanalysis_celery_beat
+    environment:
+      DATABASE_URL: postgresql://stockuser:stockpass@postgres:5432/stockanalysis
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./backend:/app
+    command: celery -A app.celery_app beat --loglevel=info
+
+  # Flower (Celery Monitoring)
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: stockanalysis_flower
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+      - celery_worker
+    command: celery -A app.celery_app flower --port=5555
+
+  # Next.js Frontend (optional - can be added later)
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   container_name: stockanalysis_frontend
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     - backend
+  #   volumes:
+  #     - ./frontend:/app
+  #     - /app/node_modules
+  #   command: npm run dev
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: stockanalysis_network
